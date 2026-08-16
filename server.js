@@ -239,6 +239,20 @@ io.on("connection", (socket) => {
           if (winnerUser) {
             try {
               await runQuery(`UPDATE users SET wins = wins + 1 WHERE id = ?`, [winnerUser.id]);
+
+              // push fresh stats straight to the winner over the socket
+              // (replaces the frontend's REST refetch on every "winner" change)
+              const updatedUser = await getQuery(`SELECT id, username, wins, losses, draws FROM users WHERE id = ?`, [winnerUser.id]);
+              io.to(winnerSocketId).emit("statsUpdated", updatedUser);
+
+              // Push the refreshed leaderboard to everyone in the room
+              const newLeaderboard = await new Promise((resolve, reject) => {
+                db.all(`SELECT username, wins FROM users ORDER BY wins DESC LIMIT 10`, [], (err, rows) => {
+                  if (err) reject(err);
+                  else resolve(rows);
+                });
+              });
+              io.emit("leaderboardUpdated", newLeaderboard);
             } catch (e) {
               console.error("DB Update failed", e);
             }
@@ -322,6 +336,8 @@ io.on("connection", (socket) => {
         lastMoveTime = Date.now();
         io.emit("update", gameObject);
         io.emit("reset", gameObject);
+      } else {
+        socket.emit("joinFailed", { message: "Game is full. Please wait for a seat to open." });
       }
     }
   });

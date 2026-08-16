@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import io from "socket.io-client";
 import axios from "axios";
 
@@ -11,12 +11,18 @@ const TicTacToe = ({ token, onLogout }) => {
   const [stats, setStats] = useState({ username: "", wins: 0, losses: 0, draws: 0 });
   const [leaderboard, setLeaderboard] = useState([]);
   const [whoseTurn, setWhoseTurn] = useState("X");
+  const [opponentLeft, setOpponentLeft] = useState(false);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [showIdleModal, setShowIdleModal] = useState(false);
   const [countdown, setCountdown] = useState(30);
+
+  const handleQuitGame = useCallback(() => {
+    if (socket) socket.emit("quitGame");
+    setShowIdleModal(false);
+  }, [socket]);
 
   useEffect(() => {
     let timer;
@@ -33,26 +39,30 @@ const TicTacToe = ({ token, onLogout }) => {
       }, 1000);
     }
     return () => clearInterval(timer);
-  }, [showIdleModal]);
+  }, [showIdleModal, handleQuitGame]);
 
-  // 1. Fetch User Stats (REST API)
+  // 1. Fetch User Stats (REST API) — now runs once on login only.
+  // Live updates after a win arrive via the "statsUpdated" socket event below.
   useEffect(() => {
+    if (!token) return;
     axios
       .get(`${BACKEND_URL}/me`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((res) => setStats(res.data))
       .catch((err) => console.error("Failed to fetch stats"));
-  }, [token, winner]); // Refresh stats when a game ends
+  }, [token]);
 
+  // Same for the leaderboard — once on login, then pushed via "leaderboardUpdated".
   useEffect(() => {
+    if (!token) return;
     axios
       .get(`${BACKEND_URL}/leaderboard`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((res) => setLeaderboard(res.data))
       .catch((err) => console.error("Failed to fetch leaderboard"));
-  }, [token, winner]); // Refresh leaderboard when a game ends
+  }, [token]);
 
   // 2. Connect Socket (Real-time)
   useEffect(() => {
@@ -76,6 +86,15 @@ const TicTacToe = ({ token, onLogout }) => {
       // Check current role from server players list to handle swaps/joins/quits
       if (state.players && state.players[newSocket.id]) {
         setRole(state.players[newSocket.id].role);
+
+        const myRole = state.players?.[newSocket.id]?.role;
+        if (myRole === "Player 1" || myRole === "Player 2") {
+          const opponentRole = myRole === "Player 1" ? "Player 2" : "Player 1";
+          const opponentStillIn = Object.values(state.players || {}).some(p => p.role === opponentRole);
+          setOpponentLeft(!opponentStillIn);
+        } else {
+          setOpponentLeft(false);
+        }
       }
     });
 
@@ -87,6 +106,18 @@ const TicTacToe = ({ token, onLogout }) => {
     // Chat listener
     newSocket.on("chat", (msgData) => {
       setChatMessages((prev) => [...prev, msgData]);
+    });
+    // Join not possible
+    newSocket.on("joinFailed", (data) => {
+      alert(data.message);
+    });
+
+    // live stats/leaderboard push 
+    newSocket.on("statsUpdated", (newStats) => {
+      setStats(newStats);
+    });
+    newSocket.on("leaderboardUpdated", (newLeaderboard) => {
+      setLeaderboard(newLeaderboard);
     });
 
     newSocket.on("idleTimeout", () => {
@@ -108,10 +139,6 @@ const TicTacToe = ({ token, onLogout }) => {
     if (socket) socket.emit("move", { index });
   };
 
-  const handleQuitGame = () => {
-    if (socket) socket.emit("quitGame");
-    setShowIdleModal(false);
-  };
   const handleReset = () => {
     if (socket) socket.emit("reset");
   };
@@ -155,7 +182,7 @@ const TicTacToe = ({ token, onLogout }) => {
       borderRadius: "5px"
     };
 
-    const [a, b, c] = winnerLine;
+    const [a, , c] = winnerLine;
     let animClass = "draw-line-horiz";
 
     if (a === 0 && c === 2)
@@ -237,11 +264,12 @@ const TicTacToe = ({ token, onLogout }) => {
         <span>
           {role === "Spectator"
             ? "You are watching as a Spectator."
-            : ((role === "Player 1" && whoseTurn === "X") || (role === "Player 2" && whoseTurn === "O"))
-              ? `Your turn`
-              : `Opponent waiting...`}
+            : opponentLeft
+              ? "Opponent has left the game."
+              : ((role === "Player 1" && whoseTurn === "X") || (role === "Player 2" && whoseTurn === "O"))
+                ? `Your turn`
+                : `Opponent waiting...`}
         </span>
-
         {/* Action Buttons Container */}
         <div style={{ display: "flex", gap: "10px" }}>
           {(role === "Player 1" || role === "Player 2") && (
